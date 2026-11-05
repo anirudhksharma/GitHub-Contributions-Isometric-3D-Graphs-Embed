@@ -7,6 +7,9 @@
  * - Multiple fetches served from cache
  * - Customizable query parameters for themes, dimensions, stats
  * - SVG image output by default, PNG with format=png
+ *
+ * Runs as a standalone server (`node server.js`) or as a Vercel function
+ * (api/index.js imports the default export, the request handler).
  */
 
 import "dotenv/config";
@@ -16,16 +19,13 @@ import { gzipSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
+import { waitUntil } from "@vercel/functions";
 import {
   fetchContributions,
   parseContributionsData,
   fetchContributionSummary,
 } from "./src/api-client.js";
-import {
-  renderIsometricChart,
-  renderWithStats,
-  exportToPNG,
-} from "./src/renderer.js";
+import { cleanupOldCache } from "./cleanup-cache.js";
 import { renderSVG } from "./src/svg-renderer.js";
 import {
   THEMES,
@@ -45,6 +45,18 @@ const documentationHTML = readFileSync(
   join(__dirname, "docs", "index.html"),
   "utf8",
 );
+
+// The PNG renderer needs canvas and jsdom, optional dependencies that aren't
+// installed on Vercel. It is loaded on the first PNG request, so SVG never
+// depends on them.
+let pngRenderer = null;
+async function loadPngRenderer() {
+  pngRenderer ??= import("./src/renderer.js").catch((error) => {
+    console.warn(`[WARN]  PNG output unavailable: ${error.message}`);
+    return null;
+  });
+  return pngRenderer;
+}
 
 // Initialize Supabase client
 const supabase = createClient(
@@ -182,15 +194,19 @@ async function getOrCreateImage(cacheKey, params) {
     const buffer = await generateGraph(params);
     memoryCacheSet(cacheKey, buffer);
 
-    cacheImage(cacheKey, buffer, params.format)
-      .then(() =>
-        console.log(`[SAVE]  ${params.username} — cached to Supabase`),
-      )
-      .catch((err) =>
-        console.error(
-          `[ERROR] ${params.username} — cache save failed: ${err?.message ?? err}`,
+    // Not awaited, so the response isn't held up. waitUntil keeps a Vercel
+    // function alive until the upload finishes (no-op elsewhere).
+    waitUntil(
+      cacheImage(cacheKey, buffer, params.format)
+        .then(() =>
+          console.log(`[SAVE]  ${params.username} — cached to Supabase`),
+        )
+        .catch((err) =>
+          console.error(
+            `[ERROR] ${params.username} — cache save failed: ${err?.message ?? err}`,
+          ),
         ),
-      );
+    );
 
     return { buffer, cacheHit: false, source: "generated" };
   })();
@@ -411,6 +427,9 @@ async function generateGraph(params) {
     return Buffer.from(renderSVG(days, { ...renderOptions, stats }), "utf8");
   }
 
+  const { renderIsometricChart, renderWithStats, exportToPNG } =
+    await loadPngRenderer();
+
   // Render chart
   const canvas = stats
     ? renderWithStats(days, renderOptions)
@@ -518,6 +537,14 @@ async function handleRequest(req, res) {
         );
       }
 
+      if (params.format === "png" && !(await loadPngRenderer())) {
+        return sendErrorResponse(
+          res,
+          501,
+          "PNG output isn't available on this server. Leave out format=png to get an SVG.",
+        );
+      }
+
       const { username, year, theme, width, height, stats, credit, format } =
         params;
       const paramsLog = `format=${format} theme=${theme} year=${year} size=${width}x${height} stats=${stats} credit=${credit}`;
@@ -535,8 +562,10 @@ async function handleRequest(req, res) {
       }
 
       // Track analytics (don't wait)
-      trackAnalytics(params, cacheHit).catch((err) =>
-        console.error("Analytics error:", err),
+      waitUntil(
+        trackAnalytics(params, cacheHit).catch((err) =>
+          console.error("Analytics error:", err),
+        ),
       );
 
       return sendImageResponse(req, res, buffer, params.format, cacheHit);
@@ -643,10 +672,30 @@ async function handleRequest(req, res) {
     }
   }
 
+  // Cache cleanup, called daily by Vercel Cron (see vercel.json). Vercel sends
+  // CRON_SECRET as a bearer token; without a secret configured the route is
+  // off, since the standalone server runs cleanup-scheduler.js instead.
+  if (url.pathname === "/api/cleanup") {
+    const secret = process.env.CRON_SECRET;
+    if (!secret || req.headers.authorization !== `Bearer ${secret}`) {
+      return sendErrorResponse(res, 401, "Unauthorized");
+    }
+    try {
+      const result = await cleanupOldCache();
+      res.writeHead(result.errors > 0 ? 500 : 200, {
+        "Content-Type": "application/json",
+      });
+      return res.end(JSON.stringify(result));
+    } catch (error) {
+      console.error("Cleanup error:", error);
+      return sendErrorResponse(res, 500, error.message);
+    }
+  }
+
   // Serve static media files
   if (url.pathname.startsWith("/media/")) {
     try {
-      const filePath = join(process.cwd(), url.pathname.slice(1)); // Remove leading slash
+      const filePath = join(__dirname, url.pathname.slice(1)); // Remove leading slash
       const fs = await import("node:fs");
       const stat = fs.statSync(filePath);
 
@@ -734,31 +783,41 @@ async function verifyGitHubAPI() {
   }
 }
 
-const server = createServer(handleRequest);
+export default handleRequest;
 
-server.listen(PORT, async () => {
-  console.log(`
+// On Vercel the platform serves requests through api/index.js; everywhere
+// else, run a standalone server.
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+function startServer() {
+  const server = createServer(handleRequest);
+
+  server.listen(PORT, async () => {
+    console.log(`
   🎨 Isometric Contributions API Server                     
   Status:     Running                                       
   Port:       ${PORT.toString().padEnd(46)}
   Storage:    Supabase (${BUCKET_NAME})${" ".repeat(
-    46 - 19 - BUCKET_NAME.length,
-  )}
+      46 - 19 - BUCKET_NAME.length,
+    )}
                                                             
   Documentation: http://localhost:${PORT}/                     
   API Endpoint:  http://localhost:${PORT}/api/graph            
   Health Check:  http://localhost:${PORT}/health               
 
   `);
-  console.log("Press Ctrl+C to stop the server\n");
-  await verifyGitHubAPI();
-});
-
-// Graceful shutdown
-process.on("SIGINT", () => {
-  console.log("\n\nShutting down gracefully...");
-  server.close(() => {
-    console.log("Server closed");
-    process.exit(0);
+    console.log("Press Ctrl+C to stop the server\n");
+    await verifyGitHubAPI();
   });
-});
+
+  // Graceful shutdown
+  process.on("SIGINT", () => {
+    console.log("\n\nShutting down gracefully...");
+    server.close(() => {
+      console.log("Server closed");
+      process.exit(0);
+    });
+  });
+}

@@ -14,7 +14,7 @@ import {
   getCubeColor,
   getStyleConfig,
   layoutChart,
-} from "./renderer.js";
+} from "./layout.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fontsDir = join(__dirname, "..", "fonts");

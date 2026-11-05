@@ -607,6 +607,14 @@ CMD ["sh", "-c", "node server.js & node cleanup-scheduler.js & wait"]
 
 Just add the environment variables to your hosting platform.
 
+**Vercel:**
+
+The API runs as a single Vercel function (`api/index.js`, which serves the same handler as `server.js`), configured in [vercel.json](vercel.json). Vercel serves **SVG only**: `canvas` and `jsdom`, which the PNG renderer needs, are optional dependencies left out of the Vercel install, so `format=png` returns `501`.
+
+1. Import the repository in Vercel. No build settings are needed; `vercel.json` sets the install command.
+2. Add the environment variables: `GITHUB_TOKEN`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and optionally `SUPABASE_BUCKET_NAME` and `CACHE_RETENTION_DAYS`.
+3. Add `CRON_SECRET` (any long random string). Vercel Cron calls `/api/cleanup` daily at 03:00 UTC with it, in place of `cleanup-scheduler.js`. The route refuses requests without it.
+
 ## Troubleshooting
 
 ### Graph looks sparse / total is lower than my profile
