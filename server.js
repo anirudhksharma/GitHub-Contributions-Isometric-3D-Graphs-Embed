@@ -512,6 +512,15 @@ function sendDocumentation(res) {
 async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
+  // On Vercel, vercel.json rewrites every path to the function and passes
+  // the requested path as __path, because the function otherwise sees the
+  // rewrite destination as its URL. Route on the requested path instead.
+  const rewrittenPath = url.searchParams.get("__path");
+  if (rewrittenPath !== null) {
+    url.searchParams.delete("__path");
+    url.pathname = `/${rewrittenPath}`;
+  }
+
   // Documentation page
   if (url.pathname === "/" || url.pathname === "/docs") {
     return sendDocumentation(res);
