@@ -7,6 +7,6 @@
       "includeFiles": "{docs,fonts,media,src}/**"
     }
   },
-  "rewrites": [{ "source": "/(.*)", "destination": "/api" }],
+  "rewrites": [{ "source": "/:path*", "destination": "/api?__path=:path*" }],
   "crons": [{ "path": "/api/cleanup", "schedule": "0 3 * * *" }]
 }
