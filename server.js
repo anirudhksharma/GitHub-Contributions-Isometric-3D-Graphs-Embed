@@ -739,7 +739,7 @@ async function handleRequest(req, res) {
   }
 
   // 404 for unknown routes
-  return sendErrorResponse(res, 404, "Not Found");
+  return sendErrorResponse(res, 404, `Not Found: ${url.pathname}`);
 }
 
 // Create server
