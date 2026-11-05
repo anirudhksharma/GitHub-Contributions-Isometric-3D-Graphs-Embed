@@ -704,7 +704,9 @@ async function handleRequest(req, res) {
   // Serve static media files
   if (url.pathname.startsWith("/media/")) {
     try {
-      const filePath = join(__dirname, url.pathname.slice(1)); // Remove leading slash
+      // "media" stays a literal path segment so Vercel's file tracing
+      // bundles the media directory with the function.
+      const filePath = join(__dirname, "media", url.pathname.slice("/media/".length));
       const fs = await import("node:fs");
       const stat = fs.statSync(filePath);
 
